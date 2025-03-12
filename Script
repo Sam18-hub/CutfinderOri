@@ -1,0 +1,192 @@
+import os
+import sys
+import gzip
+import random
+
+def import_reads(file_name, number_of_reads):
+    """Reads gzipped FASTQ files and optionally limits the number of reads."""
+    reads = []
+    try:
+        with gzip.open(file_name, 'rt') as file:
+            read_counter = 0
+            while True:
+                header = file.readline()
+                if not header:
+                    break
+                sequence = file.readline().strip().upper()
+                plus = file.readline()
+                quality = file.readline()
+                reads.append(sequence)
+                read_counter += 1
+                if number_of_reads != 0 and read_counter >= number_of_reads:
+                    break
+    except IOError as e:
+        print(f"Error opening file: {e}")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    return reads
+
+def browse():
+    """Returns the file names to be processed."""
+    return ["File path"]
+
+### Reference Sequences Input
+
+top_strand = (
+    "Plasmid sequence"
+).upper()
+
+bottom_strand = (
+    "Plasmid sequence"
+).upper()
+
+# Generate looped sequences to handle circularity
+top_strand_loop = top_strand * 3
+bottom_strand_loop = bottom_strand * 3
+
+### Program starts here
+file_names = browse()
+
+number_of_reads = int(input("How many reads[0]? "))
+
+for file_name in file_names:
+    # Create a unique folder for output files
+    folder_name = os.path.join(
+        os.path.dirname(file_name),
+        f"{os.path.basename(file_name)[:-6]}_{random.randint(0, 100000)}"
+    )
+    os.makedirs(folder_name, exist_ok=True)
+
+    print("Analyzing: " + os.path.basename(file_name))
+    reads = import_reads(file_name, number_of_reads)
+    print("Number of reads: " + str(len(reads)))
+
+    # Initialize counts for cleavage events
+    top_counts = [0] * len(top_strand)
+    bottom_counts = [0] * len(bottom_strand)
+    index = list(range(1, max(len(top_strand), len(bottom_strand)) + 1))
+
+    # Dictionaries to store sequences associated with cleavage positions
+    top_cleavage_sites = {}
+    bottom_cleavage_sites = {}
+    orphan_reads = []
+
+    # List to store read alignments for output
+    read_alignments = []
+
+    for read in reads:
+        aligned = False
+        read_aligned_info = {'read_sequence': read, 'strand': '', 'position': None}
+
+        # Align the FIRST 30 bases of the read to bottom_strand_loop (indicates cleavage on top strand)
+        read_fragment = read[:30]
+        position = bottom_strand_loop.find(read_fragment)
+        if position != -1:
+            # Read aligns to bottom strand
+            position_in_bottom_loop = position + len(read_fragment)
+            position_in_bottom = position_in_bottom_loop % len(bottom_strand)
+            # Cleavage occurs on top strand at complementary position
+            cleavage_position = (len(top_strand) - position_in_bottom - 1) % len(top_strand)
+            # **Add 30 nt to correct the cleavage position**
+            cleavage_position_corrected = (cleavage_position + 30) % len(top_strand)
+            cleavage_position_output = cleavage_position_corrected + 1  # 1-based indexing
+            top_counts[cleavage_position_corrected] += 1
+
+            # Get the nucleotide at the cleavage position on the top strand
+            cleavage_sequence = top_strand[cleavage_position_corrected]
+            # Store cleavage site information
+            if cleavage_position_corrected not in top_cleavage_sites:
+                top_cleavage_sites[cleavage_position_corrected] = {'count': 1, 'sequence': cleavage_sequence}
+            else:
+                top_cleavage_sites[cleavage_position_corrected]['count'] += 1
+
+            read_aligned_info['strand'] = 'top'
+            read_aligned_info['position'] = cleavage_position_output
+            aligned = True
+        else:
+            # Align the FIRST 30 bases of the read to top_strand_loop (indicates cleavage on bottom strand)
+            position = top_strand_loop.find(read_fragment)
+            if position != -1:
+                # Read aligns to top strand
+                position_in_top_loop = position + len(read_fragment)
+                position_in_top = position_in_top_loop % len(top_strand)
+                # Cleavage occurs on bottom strand at complementary position
+                cleavage_position = (len(bottom_strand) - position_in_top - 1) % len(bottom_strand)
+                # **Add 30 nt to correct the cleavage position**
+                cleavage_position_corrected = (cleavage_position + 30) % len(bottom_strand)
+                cleavage_position_output = cleavage_position_corrected + 1  # 1-based indexing
+                bottom_counts[cleavage_position_corrected] += 1
+
+                # Get the nucleotide at the cleavage position on the bottom strand
+                cleavage_sequence = bottom_strand[cleavage_position_corrected]
+                # Store cleavage site information
+                if cleavage_position_corrected not in bottom_cleavage_sites:
+                    bottom_cleavage_sites[cleavage_position_corrected] = {'count': 1, 'sequence': cleavage_sequence}
+                else:
+                    bottom_cleavage_sites[cleavage_position_corrected]['count'] += 1
+
+                read_aligned_info['strand'] = 'bottom'
+                read_aligned_info['position'] = cleavage_position_output
+                aligned = True
+            else:
+                # Read does not align
+                orphan_reads.append(read)
+        if aligned:
+            read_alignments.append(read_aligned_info)
+
+    total_reads = len(reads)
+    top_aligned_reads = sum(top_counts)
+    bottom_aligned_reads = sum(bottom_counts)
+    orphan_reads_number = total_reads - top_aligned_reads - bottom_aligned_reads
+
+    print(f"Top strand cleavage events: {top_aligned_reads} ({top_aligned_reads * 100.0 / total_reads:.2f}%)")
+    print(f"Bottom strand cleavage events: {bottom_aligned_reads} ({bottom_aligned_reads * 100.0 / total_reads:.2f}%)")
+    print(f"Orphan reads: {orphan_reads_number} ({orphan_reads_number * 100.0 / total_reads:.2f}%)")
+
+    # Save cleavage site information for top strand
+    with open(os.path.join(folder_name, 'top_cleavage_sites.csv'), 'w') as f_top:
+        f_top.write('Position,Sequence,Read_Count\n')
+        for position in range(len(top_strand)):
+            cleavage_sequence = top_strand[position]
+            read_count = top_cleavage_sites.get(position, {'count': 0})['count']
+            f_top.write(f"{position + 1},{cleavage_sequence},{read_count}\n")
+
+    # Save cleavage site information for bottom strand (Reversed Orientation)
+    with open(os.path.join(folder_name, 'bottom_cleavage_sites.csv'), 'w') as f_bottom:
+        f_bottom.write('Position,Sequence,Read_Count\n')
+        reversed_bottom_strand = bottom_strand[::-1]
+        reversed_bottom_counts = bottom_counts[::-1]
+        for position in range(len(bottom_strand)):
+            cleavage_sequence = reversed_bottom_strand[position]
+            read_count = reversed_bottom_counts[position]
+            f_bottom.write(f"{position + 1},{cleavage_sequence},{read_count}\n")
+
+    # Save results summary
+    with open(os.path.join(folder_name, "results_summary.txt"), "w") as f_summary:
+        f_summary.write(f"Number of reads: {total_reads}\n")
+        f_summary.write(f"Top strand cleavage events: {top_aligned_reads} ({top_aligned_reads * 100.0 / total_reads:.2f}%)\n")
+        f_summary.write(f"Bottom strand cleavage events: {bottom_aligned_reads} ({bottom_aligned_reads * 100.0 / total_reads:.2f}%)\n")
+        f_summary.write(f"Orphan reads: {orphan_reads_number} ({orphan_reads_number * 100.0 / total_reads:.2f}%)\n")
+    print("Results summary saved.")
+
+    # Save nick positions for all indices
+    with open(os.path.join(folder_name, "nick_position.csv"), "w") as f_nick:
+        f_nick.write("Position,Top_Cleavage_Count,Bottom_Cleavage_Count\n")
+        for i in range(len(index)):
+            top_count = top_counts[i] if i < len(top_counts) else 0
+            bottom_count = bottom_counts[i] if i < len(bottom_counts) else 0
+            f_nick.write(f"{index[i]},{top_count},{bottom_count}\n")
+    print("Nick position file saved.")
+
+    # Save orphan reads
+    with open(os.path.join(folder_name, 'orphan_reads.txt'), 'w') as f_orphan:
+        for read in orphan_reads:
+            f_orphan.write(read + '\n')
+    print("Orphan reads saved.")
+
+    # Save read alignments
+    with open(os.path.join(folder_name, 'read_alignments.csv'), 'w') as f_alignments:
+        f_alignments.write('Read_Sequence,Strand,Cleavage_Position\n')
+        for alignment in read_alignments:
+            f_alignments.write(f"{alignment['read_sequence']},{alignment['strand']},{alignment['position']}\n")
+    print("Read alignments saved.")
